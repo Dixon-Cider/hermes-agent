@@ -37,6 +37,7 @@ from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import build_memory_context_block
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
+    ensure_user_message_present,
     _repair_tool_call_arguments,
     _sanitize_messages_non_ascii,
     _sanitize_messages_surrogates,
@@ -923,6 +924,12 @@ def run_conversation(
         # lone surrogates (U+D800-U+DFFF) that crash json.dumps() inside
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
+
+        # Safety net for strict chat templates: guarantee a genuine user turn
+        # exists so Qwen3-style templates don't raise "No user query found in
+        # messages" (seen when compression eats the original query, leaving an
+        # all-system/assistant/tool context). API copy only — history untouched.
+        ensure_user_message_present(api_messages)
 
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)

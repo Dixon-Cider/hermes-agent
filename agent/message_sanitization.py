@@ -461,9 +461,83 @@ def _sanitize_structure_non_ascii(payload: Any) -> bool:
     return found
 
 
+_TOOL_RESPONSE_OPEN = "<tool_response>"
+_TOOL_RESPONSE_CLOSE = "</tool_response>"
+
+
+def _message_text(content: Any) -> str:
+    """Flatten a message ``content`` (str or list-of-parts) to plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "".join(parts)
+    return ""
+
+
+def ensure_user_message_present(messages: list) -> bool:
+    """Guarantee at least one genuine user turn in ``messages`` (in place).
+
+    Strict chat templates — notably Qwen3's — scan the message list in reverse
+    and ``raise_exception('No user query found in messages.')`` when they find no
+    ``role == 'user'`` message whose content is not a ``<tool_response>`` wrapper.
+    A long agentic turn whose original user query has been compressed away (or any
+    context that is all system/assistant/tool) trips this and fails the entire
+    request through the retry chain. Lenient templates (e.g. Gemma) just render
+    such a context, so this only bites on strict providers — but injecting a
+    minimal user turn is harmless everywhere and self-gating (only acts when no
+    genuine user turn exists).
+
+    Mirrors the Qwen template's own test for a "genuine" user query. If none is
+    found, inserts a minimal user turn right after any leading system message(s)
+    (the same position prefill messages use). Call on the per-request API copy so
+    the stored conversation history is untouched. Returns True if a message was
+    injected.
+    """
+    def _is_genuine_user(message: Any) -> bool:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            return False
+        text = _message_text(message.get("content")).strip()
+        if not text:
+            return False
+        return not (
+            text.startswith(_TOOL_RESPONSE_OPEN)
+            and text.endswith(_TOOL_RESPONSE_CLOSE)
+        )
+
+    if any(_is_genuine_user(m) for m in messages):
+        return False
+
+    insert_at = 0
+    while (
+        insert_at < len(messages)
+        and isinstance(messages[insert_at], dict)
+        and messages[insert_at].get("role") == "system"
+    ):
+        insert_at += 1
+    messages.insert(
+        insert_at,
+        {"role": "user", "content": "Continue with the task based on the conversation so far."},
+    )
+    logger.warning(
+        "MSG_REPAIR: no genuine user turn in outgoing request (%d msgs); injected a "
+        "synthetic user turn (strict-template guard, e.g. Qwen3 'No user query found').",
+        len(messages) - 1,
+    )
+    return True
+
+
 __all__ = [
     "_SURROGATE_RE",
     "close_interrupted_tool_sequence",
+    "ensure_user_message_present",
     "_sanitize_surrogates",
     "_sanitize_structure_surrogates",
     "_sanitize_messages_surrogates",
