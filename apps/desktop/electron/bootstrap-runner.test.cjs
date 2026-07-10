@@ -8,7 +8,9 @@ const {
   runBootstrap,
   resolveInstallScript,
   installedAgentInstallScript,
-  cachedScriptPath
+  cachedScriptPath,
+  buildPinArgs,
+  buildPosixPinArgs
 } = require('./bootstrap-runner.cjs')
 
 const SCRIPT_NAME = process.platform === 'win32' ? 'install.ps1' : 'install.sh'
@@ -78,6 +80,46 @@ test('resolveInstallScript prefers a cached script without touching the network'
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
+})
+
+// --- pin args: local/self builds must track the branch, not pin an unpushed
+//     commit (which would freeze the Update button to the build commit). ---
+
+const SHA = 'a'.repeat(40)
+
+test('buildPinArgs: CI build pins the exact commit (reproducible)', () => {
+  const args = buildPinArgs({ commit: SHA, branch: 'main', source: 'ci' })
+  assert.deepEqual(args, ['-Commit', SHA, '-Branch', 'main'])
+})
+
+test('buildPinArgs: local build omits -Commit and tracks the branch', () => {
+  const args = buildPinArgs({ commit: SHA, branch: 'local', source: 'local' })
+  assert.deepEqual(args, ['-Branch', 'local'])
+  assert.ok(!args.includes('-Commit'), 'local build must not pin an unpushed commit')
+})
+
+test('buildPinArgs: null/missing stamp yields no pin args', () => {
+  assert.deepEqual(buildPinArgs(null), [])
+  assert.deepEqual(buildPinArgs({ source: 'local' }), [])
+})
+
+test('buildPosixPinArgs: CI build pins the exact commit', () => {
+  const args = buildPosixPinArgs({
+    installStamp: { commit: SHA, branch: 'main', source: 'ci' },
+    activeRoot: '/r',
+    hermesHome: '/h'
+  })
+  assert.deepEqual(args, ['--dir', '/r', '--hermes-home', '/h', '--branch', 'main', '--commit', SHA])
+})
+
+test('buildPosixPinArgs: local build omits --commit and tracks the branch', () => {
+  const args = buildPosixPinArgs({
+    installStamp: { commit: SHA, branch: 'local', source: 'local' },
+    activeRoot: '/r',
+    hermesHome: '/h'
+  })
+  assert.deepEqual(args, ['--dir', '/r', '--hermes-home', '/h', '--branch', 'local'])
+  assert.ok(!args.includes('--commit'), 'local build must not pin an unpushed commit')
 })
 
 test('resolveInstallScript falls back to the installed agent checkout on a 404', async () => {

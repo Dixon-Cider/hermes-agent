@@ -454,9 +454,21 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
 // Build the install.ps1 pin args (-Commit / -Branch) from the install-stamp
 // so the repository stage clones the exact SHA the .exe was tested with
 // instead of falling back to install.ps1's default ($Branch = "main").
+// A locally-built (source: "local") stamp pins an UNPUSHED commit that GitHub
+// can't serve and that install.ps1/install.sh would `checkout --detach` --
+// freezing the app to its build commit so the Update button never pulls
+// anything. For local/self/fork builds, track the branch instead (the -Branch
+// path fast-forwards, and on a fork merges upstream/main) so updates actually
+// land. CI builds keep the exact-SHA pin for reproducibility.
+function _stampPinsCommit(installStamp) {
+  return Boolean(
+    installStamp && installStamp.commit && installStamp.source !== 'local'
+  )
+}
+
 function buildPinArgs(installStamp) {
   const args = []
-  if (installStamp && installStamp.commit) {
+  if (_stampPinsCommit(installStamp)) {
     args.push('-Commit', installStamp.commit)
   }
   if (installStamp && installStamp.branch) {
@@ -470,7 +482,7 @@ function buildPosixPinArgs({ installStamp, activeRoot, hermesHome }) {
   if (installStamp && installStamp.branch) {
     args.push('--branch', installStamp.branch)
   }
-  if (installStamp && installStamp.commit) {
+  if (_stampPinsCommit(installStamp)) {
     args.push('--commit', installStamp.commit)
   }
   return args
@@ -735,5 +747,7 @@ module.exports = {
   resolveLocalInstallScript,
   resolveInstallScript,
   installedAgentInstallScript,
-  cachedScriptPath
+  cachedScriptPath,
+  buildPinArgs,
+  buildPosixPinArgs
 }
