@@ -1383,15 +1383,36 @@ function Install-Repository {
                 } else {
                     git -c windows.appendAtomically=false checkout $Branch
                     if ($LASTEXITCODE -ne 0) { throw "git checkout $Branch failed (exit $LASTEXITCODE)" }
-                    # Managed installs should follow origin/$Branch exactly. If
-                    # the checkout has diverged (or has local-only commits),
-                    # ff-only pull cannot succeed — mirror ``hermes update`` and
-                    # reset to the fetched remote so bootstrap/install can recover.
-                    git -c windows.appendAtomically=false pull --ff-only origin $Branch
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Warn "Fast-forward not possible; resetting managed install to origin/$Branch..."
-                        git -c windows.appendAtomically=false reset --hard "origin/$Branch"
-                        if ($LASTEXITCODE -ne 0) { throw "git reset --hard origin/$Branch failed (exit $LASTEXITCODE)" }
+                    if (@(git -c windows.appendAtomically=false remote) -contains "upstream") {
+                        # Fork-aware update: an `upstream` remote means this
+                        # checkout carries local-only commits (custom features).
+                        # Merge upstream/main into $Branch instead of resetting to
+                        # origin/$Branch (which would destroy those commits). git
+                        # rerere auto-applies any recorded conflict resolution; a
+                        # genuinely new conflict aborts cleanly so we never rebuild
+                        # a broken tree.
+                        git -c windows.appendAtomically=false config rerere.enabled true 2>$null
+                        git -c windows.appendAtomically=false config rerere.autoupdate true 2>$null
+                        git -c windows.appendAtomically=false pull --ff-only origin $Branch 2>$null
+                        git -c windows.appendAtomically=false fetch upstream main
+                        if ($LASTEXITCODE -ne 0) { throw "git fetch upstream main failed (exit $LASTEXITCODE)" }
+                        git -c windows.appendAtomically=false merge --no-edit upstream/main
+                        if ($LASTEXITCODE -ne 0) {
+                            $conflicts = (git -c windows.appendAtomically=false diff --name-only --diff-filter=U) -join ", "
+                            git -c windows.appendAtomically=false merge --abort 2>$null
+                            throw "Fork update hit a new merge conflict rerere couldn't resolve (in: $conflicts). Merge aborted; nothing changed. Resolve manually with 'git merge upstream/main', then retry."
+                        }
+                    } else {
+                        # Managed installs should follow origin/$Branch exactly. If
+                        # the checkout has diverged (or has local-only commits),
+                        # ff-only pull cannot succeed — mirror ``hermes update`` and
+                        # reset to the fetched remote so bootstrap/install can recover.
+                        git -c windows.appendAtomically=false pull --ff-only origin $Branch
+                        if ($LASTEXITCODE -ne 0) {
+                            Write-Warn "Fast-forward not possible; resetting managed install to origin/$Branch..."
+                            git -c windows.appendAtomically=false reset --hard "origin/$Branch"
+                            if ($LASTEXITCODE -ne 0) { throw "git reset --hard origin/$Branch failed (exit $LASTEXITCODE)" }
+                        }
                     }
                 }
 

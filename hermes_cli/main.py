@@ -6752,6 +6752,45 @@ def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
         return False
 
 
+def _fork_merge_upstream(git_cmd: list[str], cwd: Path) -> bool:
+    """Merge ``upstream/main`` into the current fork branch, preserving local-only
+    commits (custom features). Returns True if HEAD advanced.
+
+    git rerere auto-applies previously recorded conflict resolutions; a genuinely
+    new conflict aborts the merge cleanly and exits so we never leave a
+    half-merged tree or build broken code. Unlike
+    :func:`_sync_with_upstream_if_needed` (which fast-forwards a *mirror* main and
+    bails the moment the fork has its own commits), this MERGES — the whole point
+    on a feature branch that carries local commits.
+    """
+    subprocess.run(git_cmd + ["config", "rerere.enabled", "true"], cwd=cwd, capture_output=True, text=True)
+    subprocess.run(git_cmd + ["config", "rerere.autoupdate", "true"], cwd=cwd, capture_output=True, text=True)
+    pre = _capture_head_sha(git_cmd, cwd)
+    print("→ Merging upstream/main (fork-aware update)...")
+    fetch = subprocess.run(
+        git_cmd + ["fetch", "upstream", "main"], cwd=cwd, capture_output=True, text=True
+    )
+    if fetch.returncode != 0:
+        print("✗ git fetch upstream main failed.")
+        if fetch.stderr.strip():
+            print(f"  {fetch.stderr.strip().splitlines()[0]}")
+        sys.exit(1)
+    merge = subprocess.run(
+        git_cmd + ["merge", "--no-edit", "upstream/main"], cwd=cwd, capture_output=True, text=True
+    )
+    if merge.returncode != 0:
+        unmerged = subprocess.run(
+            git_cmd + ["diff", "--name-only", "--diff-filter=U"],
+            cwd=cwd, capture_output=True, text=True,
+        ).stdout.strip().replace("\n", ", ")
+        subprocess.run(git_cmd + ["merge", "--abort"], cwd=cwd, capture_output=True, text=True)
+        print("✗ Fork update hit a new merge conflict rerere couldn't resolve:")
+        print(f"  {unmerged}")
+        print("  Merge aborted (nothing changed). Resolve manually: git merge upstream/main, then retry.")
+        sys.exit(1)
+    return _capture_head_sha(git_cmd, cwd) != pre
+
+
 def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
     """Check if fork is behind upstream and sync if safe.
 
@@ -9622,6 +9661,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
             and (gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty()))
         )
 
+        # Fork-aware update: merge upstream/main into our branch (keeping
+        # local-only commits) BEFORE comparing against origin. _fork_mode gates
+        # off the destructive "reset --hard origin/branch" fallback below;
+        # _fork_updated skips the "already up to date with origin" short-circuit
+        # so freshly-merged upstream work still flows into the dependency sync.
+        _fork_mode = is_fork and _has_upstream_remote(git_cmd, PROJECT_ROOT)
+        _fork_updated = _fork_merge_upstream(git_cmd, PROJECT_ROOT) if _fork_mode else False
+
         # Check if there are updates
         result = subprocess.run(
             git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
@@ -9632,11 +9679,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         commit_count = int(result.stdout.strip())
 
-        if commit_count == 0:
+        if commit_count == 0 and not _fork_updated:
             _invalidate_update_cache()
 
-            # Even if origin is up to date, the fork may be behind upstream
-            if is_fork and branch == "main":
+            # Fork whose upstream remote isn't wired up yet: offer to add it (the
+            # fork-aware merge above only runs once an `upstream` remote exists).
+            if is_fork and branch == "main" and not _fork_mode:
                 _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
 
             # Restore stash and switch back to original branch if we moved
@@ -9744,10 +9792,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 capture_output=True,
                 text=True,
             )
-            if pull_result.returncode != 0:
+            if pull_result.returncode != 0 and not _fork_mode:
                 # ff-only failed — local and remote have diverged (e.g. upstream
                 # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
+                # stashed, reset to match the remote exactly. Skipped in fork
+                # mode: a fork keeps its local-only commits and relies on the
+                # upstream merge above rather than being reset to origin.
                 print(
                     "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
                 )

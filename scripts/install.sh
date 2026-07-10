@@ -1222,13 +1222,35 @@ clone_repo() {
             git remote set-branches origin "$BRANCH" 2>/dev/null || true
             git fetch origin "$BRANCH"
             git checkout "$BRANCH"
-            # Managed installs should follow origin/$BRANCH exactly. If the
-            # checkout has diverged (or has local-only commits), ff-only pull
-            # cannot succeed — mirror ``hermes update`` and reset to the
-            # fetched remote so bootstrap/install can recover.
-            if ! git pull --ff-only origin "$BRANCH"; then
-                log_warn "Fast-forward not possible; resetting managed install to origin/$BRANCH..."
-                git reset --hard "origin/$BRANCH"
+            if git remote | grep -qx upstream; then
+                # Fork-aware update: an 'upstream' remote means this checkout
+                # carries local-only commits (custom features). Merge
+                # upstream/main into $BRANCH instead of resetting to
+                # origin/$BRANCH (which would destroy those commits). git rerere
+                # auto-applies any recorded conflict resolution; a genuinely new
+                # conflict aborts cleanly so we never rebuild a broken tree.
+                git config rerere.enabled true || true
+                git config rerere.autoupdate true || true
+                git pull --ff-only origin "$BRANCH" 2>/dev/null || true
+                if ! git fetch upstream main; then
+                    log_error "git fetch upstream main failed"
+                    exit 1
+                fi
+                if ! git merge --no-edit upstream/main; then
+                    conflicts="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+                    git merge --abort 2>/dev/null || true
+                    log_error "Fork update hit a new merge conflict rerere couldn't resolve (in: ${conflicts}). Merge aborted; nothing changed. Resolve manually with 'git merge upstream/main', then retry."
+                    exit 1
+                fi
+            else
+                # Managed installs should follow origin/$BRANCH exactly. If the
+                # checkout has diverged (or has local-only commits), ff-only pull
+                # cannot succeed — mirror ``hermes update`` and reset to the
+                # fetched remote so bootstrap/install can recover.
+                if ! git pull --ff-only origin "$BRANCH"; then
+                    log_warn "Fast-forward not possible; resetting managed install to origin/$BRANCH..."
+                    git reset --hard "origin/$BRANCH"
+                fi
             fi
 
             if [ -n "$autostash_ref" ]; then
