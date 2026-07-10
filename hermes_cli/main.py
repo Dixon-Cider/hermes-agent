@@ -9606,6 +9606,25 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         current_branch = result.stdout.strip()
 
+        # Fork-aware retarget: on a fork, the runtime feature branch (e.g.
+        # `local`) carries our local-only commits. The desktop bootstrap always
+        # asks to update "main", but switching to main would leave the feature
+        # branch untouched — upstream never reaches it, and the rebuilt app
+        # silently drops our features (the "clicked Update, nothing changed"
+        # trap). So when we're a fork sitting on a non-main branch, update THAT
+        # branch in place: _fork_merge_upstream (below) merges upstream/main
+        # into it, preserving our local commits.
+        if (
+            is_fork
+            and current_branch not in ("HEAD", branch)
+            and _has_upstream_remote(git_cmd, PROJECT_ROOT)
+        ):
+            print(
+                f"  ⚠ Fork on branch '{current_branch}' — updating it in place "
+                f"(merging upstream/main) instead of switching to {branch}."
+            )
+            branch = current_branch
+
         # If user is on a different branch than the update target, switch
         # to the target. When the target is "main" this is the historical
         # "always update against main" behavior; for any other target it's
