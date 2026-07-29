@@ -2341,16 +2341,11 @@ def run_conversation(
                         )
                     except Exception:
                         pass
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "[System: your previous response began repeating itself and was "
-                                "stopped. Produce a concise, non-repetitive answer. If you have "
-                                "already answered, simply finish; if you are blocked, state the blocker.]"
-                            ),
-                        }
-                    )
+                    # Steer the retry without breaking role alternation (the
+                    # helper piggybacks the nudge onto the trailing message
+                    # rather than appending a synthetic user turn).
+                    from agent.loop_detector import apply_loop_recovery_nudge
+                    apply_loop_recovery_nudge(messages)
                     retry_count = 0
                     continue
                 if thinking_spinner:

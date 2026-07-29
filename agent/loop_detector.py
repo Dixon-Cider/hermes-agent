@@ -24,7 +24,6 @@ looped partial (no history poisoning) and re-prompts. See the project plan.
 from __future__ import annotations
 
 import math
-import os
 import zlib
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -65,19 +64,12 @@ class LoopDetectionConfig:
 _FALSEY = {"0", "false", "no", "off", ""}
 
 
-def _env_override_enabled(default: bool) -> bool:
-    v = os.environ.get("HERMES_LOOP_DETECTION_ENABLED")
-    if v is None:
-        return default
-    return v.strip().lower() not in _FALSEY
-
-
 def load_loop_detection_config(config: Optional[dict] = None) -> LoopDetectionConfig:
-    """Build a :class:`LoopDetectionConfig` from ``config.yaml`` + env overrides.
+    """Build a :class:`LoopDetectionConfig` from ``config.yaml``.
 
-    Mirrors the precedence used by ``verification_stop.verify_on_stop_enabled``:
-    an explicit ``HERMES_LOOP_DETECTION_ENABLED`` env var wins over the
-    ``loop_detection.enabled`` config value, which defaults to ``True``.
+    Enablement comes from the ``loop_detection.enabled`` config value (default
+    ``True``). Per AGENTS.md, behavioral settings live in ``config.yaml`` and
+    ``.env`` is for secrets only, so there is deliberately no env-var override.
     """
     if config is None:
         try:
@@ -109,7 +101,7 @@ def load_loop_detection_config(config: Optional[dict] = None) -> LoopDetectionCo
         return bool(val)
 
     return LoopDetectionConfig(
-        enabled=_env_override_enabled(_flag("enabled", defaults.enabled)),
+        enabled=_flag("enabled", defaults.enabled),
         window_chars=max(256, _num("window_chars", defaults.window_chars, int)),
         consecutive_line_threshold=max(
             2, _num("consecutive_line_threshold", defaults.consecutive_line_threshold, int)
@@ -325,17 +317,10 @@ REASONING_DEFAULTS = LoopDetectionConfig(
 )
 
 
-def _reasoning_env_override_enabled(default: bool) -> bool:
-    v = os.environ.get("HERMES_REASONING_LOOP_DETECTION_ENABLED")
-    if v is None:
-        return default
-    return v.strip().lower() not in _FALSEY
-
-
 def load_reasoning_loop_detection_config(config: Optional[dict] = None) -> LoopDetectionConfig:
     """Config for the reasoning-trace detector: ``loop_detection.reasoning`` applied
-    over reasoning-tuned defaults (:data:`REASONING_DEFAULTS`). Env
-    ``HERMES_REASONING_LOOP_DETECTION_ENABLED`` wins over the config flag."""
+    over reasoning-tuned defaults (:data:`REASONING_DEFAULTS`). Enablement is
+    config-only (see :func:`load_loop_detection_config`)."""
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -366,7 +351,7 @@ def load_reasoning_loop_detection_config(config: Optional[dict] = None) -> LoopD
         return bool(val)
 
     return LoopDetectionConfig(
-        enabled=_reasoning_env_override_enabled(_flag("enabled", d.enabled)),
+        enabled=_flag("enabled", d.enabled),
         window_chars=max(256, _num("window_chars", d.window_chars, int)),
         consecutive_line_threshold=max(
             2, _num("consecutive_line_threshold", d.consecutive_line_threshold, int)
@@ -398,6 +383,45 @@ def build_reasoning_loop_detector(agent: Any = None) -> Optional[StreamLoopDetec
     return StreamLoopDetector(cfg)
 
 
+LOOP_RECOVERY_MARKER = (
+    "[System: your previous response began repeating itself and was stopped. "
+    "Produce a concise, non-repetitive answer. If you have already answered, "
+    "simply finish; if you are blocked, state the blocker.]"
+)
+
+
+def apply_loop_recovery_nudge(messages: list) -> None:
+    """Steer the post-loop retry without breaking role alternation.
+
+    The looped partial is discarded before this runs, so ``messages[-1]`` is
+    whatever preceded it — usually the current user turn (loop on the first
+    call) or a tool result (loop mid tool-batch). Appending a fresh ``user``
+    message there would put two user turns back-to-back AND inject a synthetic
+    user mid-loop; AGENTS.md forbids both, and strict chat templates (Qwen3 and
+    friends) reject the resulting sequence outright. So piggyback the nudge onto
+    the trailing message instead, mirroring the ``/steer`` drain, and only append
+    a new turn when the trailing message is an assistant one (where a user turn
+    is legal alternation).
+
+    Mutates ``messages`` in place.
+    """
+    last = messages[-1] if messages else None
+    if isinstance(last, dict) and last.get("role") in ("user", "tool"):
+        existing = last.get("content", "")
+        if isinstance(existing, str):
+            last["content"] = (existing + "\n\n" + LOOP_RECOVERY_MARKER) if existing else LOOP_RECOVERY_MARKER
+        else:
+            # Multimodal content blocks — append a text block.
+            try:
+                blocks = list(existing) if existing else []
+                blocks.append({"type": "text", "text": LOOP_RECOVERY_MARKER})
+                last["content"] = blocks
+            except Exception:
+                pass
+        return
+    messages.append({"role": "user", "content": LOOP_RECOVERY_MARKER})
+
+
 __all__ = [
     "StreamLoopDetector",
     "StreamLoopDetected",
@@ -407,4 +431,6 @@ __all__ = [
     "REASONING_DEFAULTS",
     "load_reasoning_loop_detection_config",
     "build_reasoning_loop_detector",
+    "LOOP_RECOVERY_MARKER",
+    "apply_loop_recovery_nudge",
 ]

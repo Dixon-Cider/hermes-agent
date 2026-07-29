@@ -1430,8 +1430,8 @@ DEFAULT_CONFIG = {
         # Reasoning-trace loop detection: a SEPARATE detector fed <think>/reasoning
         # tokens (the content detector never sees them). Default ON with looser
         # thresholds — reasoning legitimately repeats, so only egregious loops
-        # (e.g. Qwen3 cycling a plan for minutes) trip. Env kill-switch:
-        # HERMES_REASONING_LOOP_DETECTION_ENABLED=0.
+        # (e.g. Qwen3 cycling a plan for minutes) trip. Kill-switch:
+        # loop_detection.reasoning.enabled = false.
         "reasoning": {
             "enabled": True,
             "window_chars": 8000,

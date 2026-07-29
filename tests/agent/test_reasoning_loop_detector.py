@@ -71,10 +71,14 @@ def test_factory_none_when_disabled():
     assert build_reasoning_loop_detector(_A()) is None
 
 
-def test_env_override_disables(monkeypatch):
+def test_config_flag_disables(monkeypatch):
+    # Enablement is config-only (AGENTS.md: no HERMES_* vars for behavior).
+    monkeypatch.setenv("HERMES_REASONING_LOOP_DETECTION_ENABLED", "1")
+    cfg = load_reasoning_loop_detection_config({"loop_detection": {"reasoning": {"enabled": False}}})
+    assert cfg.enabled is False
     monkeypatch.setenv("HERMES_REASONING_LOOP_DETECTION_ENABLED", "0")
     cfg = load_reasoning_loop_detection_config({"loop_detection": {"reasoning": {"enabled": True}}})
-    assert cfg.enabled is False
+    assert cfg.enabled is True
 
 
 def test_reasoning_defaults_are_looser_than_content():

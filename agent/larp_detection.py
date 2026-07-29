@@ -18,7 +18,6 @@ open (never re-prompts on error).
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any, Optional
 
@@ -118,9 +117,12 @@ def _flag(sec: dict, key: str, default: bool) -> bool:
 
 
 def larp_detection_enabled(config: Optional[dict] = None, agent: Any = None) -> bool:
-    env = os.environ.get("HERMES_LARP_DETECTION")
-    if env is not None:
-        return env.strip().lower() not in _FALSEY
+    """Whether the post-turn LARP guard runs this turn.
+
+    Enablement is config-only (``larp_detection.enabled``): per AGENTS.md,
+    behavioral settings belong in ``config.yaml`` and ``.env`` is for secrets,
+    so there is deliberately no env-var override.
+    """
     sec = _section(config)
     if _flag(sec, "enabled", False):
         return True

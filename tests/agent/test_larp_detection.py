@@ -71,9 +71,11 @@ def test_disabled_by_default():
     assert larp_detection_enabled({"larp_detection": {"enabled": False}}) is False
 
 
-def test_env_override_enables(monkeypatch):
+def test_env_cannot_override_config(monkeypatch):
+    # Enablement is config-only (AGENTS.md: no HERMES_* vars for behavior).
     monkeypatch.setenv("HERMES_LARP_DETECTION", "1")
-    assert larp_detection_enabled({"larp_detection": {"enabled": False}}) is True
+    assert larp_detection_enabled({"larp_detection": {"enabled": False}}) is False
+    assert larp_detection_enabled({"larp_detection": {"enabled": True}}) is True
 
 
 # ---- tuning from real session strings (narrate-then-stop / terminal action) ----

@@ -10,11 +10,18 @@ from __future__ import annotations
 import random
 
 from agent.loop_detector import (
+    LOOP_RECOVERY_MARKER,
     LoopDetectionConfig,
     StreamLoopDetector,
+    apply_loop_recovery_nudge,
     build_stream_loop_detector,
     load_loop_detection_config,
 )
+
+
+def _adjacent_same_role(messages) -> bool:
+    roles = [m.get("role") for m in messages]
+    return any(a == b for a, b in zip(roles, roles[1:]))
 
 
 def _feed_all(det: StreamLoopDetector, text: str, chunk: int = 7) -> bool:
@@ -152,10 +159,13 @@ def test_factory_returns_none_when_disabled():
     assert build_stream_loop_detector(_A()) is None
 
 
-def test_env_override_disables(monkeypatch):
+def test_config_flag_disables(monkeypatch):
+    # Enablement is config-only (AGENTS.md: no HERMES_* vars for behavior).
+    # A stray env var must NOT be able to flip the guard on or off.
+    monkeypatch.setenv("HERMES_LOOP_DETECTION_ENABLED", "1")
+    assert load_loop_detection_config({"loop_detection": {"enabled": False}}).enabled is False
     monkeypatch.setenv("HERMES_LOOP_DETECTION_ENABLED", "0")
-    cfg = load_loop_detection_config({"loop_detection": {"enabled": True}})
-    assert cfg.enabled is False
+    assert load_loop_detection_config({"loop_detection": {"enabled": True}}).enabled is True
 
 
 def test_config_parses_overrides():
@@ -165,3 +175,60 @@ def test_config_parses_overrides():
     assert cfg.enabled is True
     assert cfg.consecutive_line_threshold == 3
     assert cfg.window_chars == 2048
+
+
+# ----- loop-recovery nudge: must preserve strict role alternation -----
+# Regression: the recovery used to append a bare {"role": "user"} after the
+# discarded partial, producing user-then-user on a first-call loop (AGENTS.md
+# forbids same-role adjacency and synthetic mid-loop user turns; strict chat
+# templates reject the sequence outright).
+
+
+def test_nudge_on_trailing_user_does_not_duplicate_role():
+    msgs = [{"role": "user", "content": "do the thing"}]
+    apply_loop_recovery_nudge(msgs)
+    assert len(msgs) == 1, "must not append a second user turn"
+    assert msgs[0]["role"] == "user"
+    assert "do the thing" in msgs[0]["content"]
+    assert LOOP_RECOVERY_MARKER in msgs[0]["content"]
+    assert not _adjacent_same_role(msgs)
+
+
+def test_nudge_on_trailing_tool_piggybacks():
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "tool_call_id": "1", "content": "result"},
+    ]
+    apply_loop_recovery_nudge(msgs)
+    assert len(msgs) == 3, "must not append after a tool result"
+    assert msgs[-1]["role"] == "tool"
+    assert LOOP_RECOVERY_MARKER in msgs[-1]["content"]
+    assert not _adjacent_same_role(msgs)
+
+
+def test_nudge_after_assistant_appends_legal_user_turn():
+    msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "partial"}]
+    apply_loop_recovery_nudge(msgs)
+    assert len(msgs) == 3 and msgs[-1]["role"] == "user"
+    assert msgs[-1]["content"] == LOOP_RECOVERY_MARKER
+    assert not _adjacent_same_role(msgs)
+
+
+def test_nudge_preserves_multimodal_content_blocks():
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "look"},
+                                         {"type": "image_url", "image_url": {"url": "x"}}]}]
+    apply_loop_recovery_nudge(msgs)
+    assert len(msgs) == 1
+    blocks = msgs[0]["content"]
+    assert isinstance(blocks, list) and len(blocks) == 3
+    assert blocks[1]["type"] == "image_url", "existing blocks must survive"
+    assert blocks[-1] == {"type": "text", "text": LOOP_RECOVERY_MARKER}
+
+
+def test_repeated_nudges_never_create_adjacency():
+    # Multiple loop trips in one turn (retry 1..N) must stay alternation-safe.
+    msgs = [{"role": "user", "content": "q"}]
+    for _ in range(3):
+        apply_loop_recovery_nudge(msgs)
+    assert not _adjacent_same_role(msgs)
