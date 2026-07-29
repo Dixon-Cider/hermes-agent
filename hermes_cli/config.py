@@ -9424,6 +9424,18 @@ def set_config_value(key: str, value: str, force: bool = False):
             coerced_value = float(value)
 
     value = coerced_value
+    # Setting a `model.<subkey>` path when `model` is still a bare string must
+    # not discard the configured model. _set_nested replaces a scalar leaf with
+    # a fresh dict (intentional, generic behavior), which for `model` means the
+    # model NAME silently disappears: `model: openai/gpt-5` +
+    # `set model.lmstudio_load_mode jit` used to leave `model: {lmstudio_load_mode: jit}`
+    # and no model configured. Promote the string to the canonical `model.default`
+    # first so the name survives the shape change.
+    _mkey = key.strip()
+    if _mkey.startswith("model.") and _mkey.count(".") >= 1:
+        _existing_model = user_config.get("model")
+        if isinstance(_existing_model, str) and _existing_model.strip():
+            user_config["model"] = {"default": _existing_model}
     _set_nested(user_config, key, value)
     # Normalize the api_base → base_url alias at set-time too (issue #8919),
     # so a fresh `hermes config set model.api_base ...` lands on the canonical

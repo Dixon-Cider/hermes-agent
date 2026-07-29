@@ -930,3 +930,51 @@ class TestDisplaySkinTouch:
 
         set_config_value("display.skin", "neon")
         assert (skins / "neon.yaml").read_text() == body
+
+
+# ---------------------------------------------------------------------------
+# model.<subkey> must not destroy a string-shaped `model`
+# ---------------------------------------------------------------------------
+
+class TestModelSubkeyPreservesName:
+    """Regression: `model` is a bare string until someone sets a `model.*` path.
+
+    _set_nested replaces a scalar leaf with a fresh dict (intentional, generic
+    behavior), so `model: openai/gpt-5` + `set model.lmstudio_load_mode jit`
+    used to leave `model: {lmstudio_load_mode: jit}` — the configured model name
+    silently gone. The documented LM Studio JIT instructions hit exactly this.
+    """
+
+    def test_string_model_is_promoted_to_default(self, _isolated_hermes_home):
+        set_config_value("model", "openai/gpt-5")
+        set_config_value("model.lmstudio_load_mode", "jit")
+
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        model = cfg["model"]
+        assert isinstance(model, dict), "model should be promoted to a mapping"
+        assert model["default"] == "openai/gpt-5", "model name must survive"
+        assert model["lmstudio_load_mode"] == "jit"
+
+    def test_dict_model_keeps_existing_keys(self, _isolated_hermes_home):
+        set_config_value("model.default", "openai/gpt-5")
+        set_config_value("model.provider", "lmstudio")
+        set_config_value("model.lmstudio_load_mode", "jit")
+
+        from hermes_cli.config import load_config
+
+        model = load_config()["model"]
+        assert model["default"] == "openai/gpt-5"
+        assert model["provider"] == "lmstudio"
+        assert model["lmstudio_load_mode"] == "jit"
+
+    def test_empty_string_model_is_not_resurrected(self, _isolated_hermes_home):
+        """An unset model must not become `default: ""` noise."""
+        set_config_value("model.lmstudio_load_mode", "explicit")
+
+        from hermes_cli.config import load_config
+
+        model = load_config()["model"]
+        assert model["lmstudio_load_mode"] == "explicit"
+        assert not model.get("default"), "empty model must not be materialized"
