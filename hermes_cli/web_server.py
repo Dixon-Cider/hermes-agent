@@ -838,6 +838,16 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Context window override (0 = auto-detect from model metadata)",
         "category": "general",
     },
+    "model.lmstudio_load_mode": {
+        "type": "select",
+        "description": (
+            "LM Studio only: 'explicit' preloads the model through LM Studio's "
+            "management API; 'jit' skips the preload and lets LM Studio load and "
+            "evict on demand (use with JIT loading / Auto-Evict)"
+        ),
+        "options": ["explicit", "jit"],
+        "category": "general",
+    },
     "terminal.backend": {
         "type": "select",
         "description": "Terminal execution backend",
@@ -1094,11 +1104,16 @@ CONFIG_SCHEMA = _build_schema_from_config(DEFAULT_CONFIG)
 # by the normalize/denormalize cycle.  Insert model_context_length right after
 # the "model" key so it renders adjacent in the frontend.
 _mcl_entry = _SCHEMA_OVERRIDES["model_context_length"]
+# model.lmstudio_load_mode is likewise virtual: DEFAULT_CONFIG carries `model`
+# as a bare string (the model name), so the derived schema has no nested model
+# section to hang it on, but the runtime reads it from a mapping-shaped `model`.
+_lm_load_entry = _SCHEMA_OVERRIDES["model.lmstudio_load_mode"]
 _ordered_schema: Dict[str, Dict[str, Any]] = {}
 for _k, _v in CONFIG_SCHEMA.items():
     _ordered_schema[_k] = _v
     if _k == "model":
         _ordered_schema["model_context_length"] = _mcl_entry
+        _ordered_schema["model.lmstudio_load_mode"] = _lm_load_entry
 CONFIG_SCHEMA = _ordered_schema
 
 
