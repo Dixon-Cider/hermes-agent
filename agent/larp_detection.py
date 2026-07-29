@@ -83,6 +83,19 @@ _NARRATE_THEN_STOP = re.compile(
 )
 
 # Bare terminal action announcement: a sentence STARTING with an action gerund
+# Clauses that make a following announcement conditional on the USER, not a
+# claim of work done: "Let me know and I'll implement it", "Once you confirm,
+# I'll start", "If so, I'll run it now". Used to suppress the intent-announcement
+# branch when the model is waiting on approval (see _first_claim). Kept separate
+# from the question check so it still fires when the question fell outside the
+# tail window of a long response.
+_CONDITIONAL_LEAD = re.compile(
+    r"\b(?:let me know|just say|say the word|tell me|once you|after you|when you|"
+    r"if so|if you|if that|if it|pending your|awaiting your|on your (?:go|approval|confirmation)|"
+    r"confirm(?:ed)?|approve|give me the (?:go|green light))\b",
+    re.IGNORECASE,
+)
+
 # and ENDING the message with "now"/"immediately"/"…" (no trailing question).
 # Catches "Executing now.", "Starting Batch 1 now.", "Proceeding with dispatch…".
 _TERMINAL_ACTION = re.compile(
@@ -170,13 +183,20 @@ def _first_claim(text: str) -> Optional[str]:
     if text.rstrip().endswith("?"):
         return None
     tail = text[-200:]
-    m = _NARRATE_THEN_STOP.search(tail)
-    if m:
-        return tail[m.start() : m.start() + 140].strip()
-    m = _TERMINAL_ACTION.search(tail)
-    if m:
-        return tail[m.start() : m.start() + 140].strip()
-    return None
+    m = _NARRATE_THEN_STOP.search(tail) or _TERMINAL_ACTION.search(tail)
+    if not m:
+        return None
+    # An announcement that is CONDITIONAL on the user is a request for
+    # confirmation, not a claim: "Which approach do you prefer? Let me know and
+    # I'll implement it." Re-prompting there is actively harmful — it pushes the
+    # model to act without the approval it just asked for. Suppress when the
+    # announcement is preceded (nearby) by a question, or by an explicit
+    # "waiting on you" clause. Past-tense claims above are unaffected: those are
+    # factual assertions regardless of any question that follows.
+    before = tail[: m.start()]
+    if "?" in before or _CONDITIONAL_LEAD.search(before):
+        return None
+    return tail[m.start() : m.start() + 140].strip()
 
 
 def _looks_specific(claim: str) -> bool:

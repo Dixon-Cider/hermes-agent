@@ -383,6 +383,49 @@ def build_reasoning_loop_detector(agent: Any = None) -> Optional[StreamLoopDetec
     return StreamLoopDetector(cfg)
 
 
+def feed_content_delta(agent, text: str) -> bool:
+    """Feed streamed assistant *content* to the loop detector.
+
+    Returns ``True`` if this delta tripped the guard, in which case the caller's
+    stream should abort via the existing interrupt path. Safe to call from every
+    streaming path (chat-completions deltas, Anthropic native text blocks, …) —
+    it is a no-op when detection is disabled or already tripped this call.
+    """
+    det = getattr(agent, "_active_loop_detector", None)
+    if det is None or getattr(agent, "_loop_detected", False) or not text:
+        return False
+    try:
+        if det.feed(text):
+            agent._loop_detected = True
+            agent._loop_detected_reason = det.reason()
+            agent._interrupt_requested = True
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def feed_reasoning_delta(agent, text: str) -> bool:
+    """Feed streamed *reasoning/thinking* text to the reasoning loop detector.
+
+    Separate detector with looser thresholds — reasoning legitimately revisits
+    ideas, so only egregious cycles trip. Same abort contract as
+    :func:`feed_content_delta`.
+    """
+    det = getattr(agent, "_active_reasoning_loop_detector", None)
+    if det is None or getattr(agent, "_loop_detected", False) or not text:
+        return False
+    try:
+        if det.feed(text):
+            agent._loop_detected = True
+            agent._loop_detected_reason = "reasoning " + det.reason()
+            agent._interrupt_requested = True
+            return True
+    except Exception:
+        return False
+    return False
+
+
 LOOP_RECOVERY_MARKER = (
     "[System: your previous response began repeating itself and was stopped. "
     "Produce a concise, non-repetitive answer. If you have already answered, "
@@ -433,4 +476,6 @@ __all__ = [
     "build_reasoning_loop_detector",
     "LOOP_RECOVERY_MARKER",
     "apply_loop_recovery_nudge",
+    "feed_content_delta",
+    "feed_reasoning_delta",
 ]

@@ -146,3 +146,43 @@ def test_post_compaction_window_default_off():
 
     # default window 0 -> disabled stays disabled even right after compaction.
     assert larp_detection_enabled({"larp_detection": {"enabled": False}}, agent=_JustCompacted()) is False
+
+
+# ---- asking the user is NOT claiming ----
+# The guard must never re-prompt a turn that stops to ask a question: doing so
+# pushes the model to act without the approval it just requested — worse than
+# the LARP it is trying to prevent. Regression for the "question + conditional
+# future" shape, which the trailing-"?" check alone did not cover.
+
+
+def test_question_then_conditional_future_is_not_larp():
+    for fr in (
+        "Which approach do you prefer? Let me know and I'll implement it.",
+        "Should I use the staging or prod bucket? Once you confirm, I'll start the migration.",
+        "Want me to proceed? If so, I'll run the migration now.",
+        "I can do this two ways. Which do you prefer? Just say the word.",
+    ):
+        assert build_larp_nudge(messages=[_u("x")], final_response=fr, config=CFG) is None, fr
+
+
+def test_conditional_lead_without_question_is_not_larp():
+    # The question can fall outside the tail window on a long response; an
+    # explicit "waiting on you" clause must still suppress the announcement.
+    fr = "Here is the full plan.\n\n" + ("Detail line.\n" * 40) + "Once you approve, I'll start the migration."
+    assert build_larp_nudge(messages=[_u("x")], final_response=fr, config=CFG) is None
+
+
+def test_blocked_asking_for_input_is_not_larp():
+    for fr in (
+        "I need the API key before I can continue. Where should I read it from?",
+        "I'm blocked: the repo has no remote configured. Which remote should I add?",
+    ):
+        assert build_larp_nudge(messages=[_u("x")], final_response=fr, config=CFG) is None, fr
+
+
+def test_past_tense_claim_still_flagged_despite_a_question():
+    # A factual past-tense assertion is a claim regardless of any question or
+    # confirmation language elsewhere — suppression applies only to the
+    # conditional intent-announcement branch.
+    fr = "I confirmed the plan with you earlier. I have now deployed the changes."
+    assert build_larp_nudge(messages=[_u("x")], final_response=fr, config=CFG) is not None
