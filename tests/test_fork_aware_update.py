@@ -23,7 +23,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
 INSTALL_PS1 = REPO_ROOT / "scripts" / "install.ps1"
-MAIN_PY = REPO_ROOT / "hermes_cli" / "main.py"
+# The update pipeline was extracted from main.py into update_cmd.py upstream
+# (mechanical move; main.py re-exports every name). The fork-aware helpers moved
+# with it, so assert against the module that actually defines them.
+MAIN_PY = REPO_ROOT / "hermes_cli" / "update_cmd.py"
 
 
 def _install_sh_block() -> str:

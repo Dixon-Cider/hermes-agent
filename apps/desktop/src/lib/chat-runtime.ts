@@ -9,22 +9,7 @@ import type { ComposerAttachment } from '@/store/composer'
 import type { ModelOptionsResponse, SessionInfo } from '@/types/hermes'
 
 export const SLASH_COMMAND_RE = /^\/[^\s/]*(?:\s|$)/
-export const BUILTIN_PERSONALITIES = [
-  'helpful',
-  'concise',
-  'technical',
-  'creative',
-  'teacher',
-  'kawaii',
-  'catgirl',
-  'pirate',
-  'shakespeare',
-  'surfer',
-  'noir',
-  'uwu',
-  'philosopher',
-  'hype'
-]
+export { BUILTIN_PERSONALITIES } from '@/lib/personalities'
 
 const THINKING_STATUS_PREFIX_RE =
   /^\s*(?:(?:[^\s.]{1,16})\s+)?(?:processing|thinking|reasoning|analyzing|pondering|contemplating|musing|cogitating|ruminating|deliberating|mulling|reflecting|computing|synthesizing|formulating|brainstorming)\.\.\.\s*/i
@@ -52,6 +37,7 @@ export function createClientSessionState(
     awaitingResponse: false,
     streamId: null,
     sawAssistantPayload: false,
+    adoptedRunningTurn: false,
     pendingBranchGroup: null,
     interrupted: false,
     interimBoundaryPending: false,
@@ -64,6 +50,10 @@ export function createClientSessionState(
 export function sessionTitle(session: SessionInfo): string {
   return session.title?.trim() || session.preview?.trim() || 'Untitled session'
 }
+
+/** What a session is called before it has been sent — and before its composer
+ *  has been typed into, which is the only thing that can name it earlier. */
+export const NEW_SESSION_TITLE = 'New session'
 
 export function coerceGatewayText(value: unknown): string {
   if (typeof value === 'string') {
@@ -387,6 +377,13 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
 
   const createdAt = messageCreatedAt(message)
 
+  // Reactions and the durable row id ride metadata.custom for every role — the
+  // established channel for per-message extras (attachmentRefs below).
+  const reactionMeta = {
+    ...(message.rowId !== undefined ? { rowId: message.rowId } : {}),
+    ...(message.reactions?.length ? { reactions: message.reactions } : {})
+  }
+
   if (role === 'user') {
     return {
       id: message.id,
@@ -394,7 +391,7 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
       content: message.parts.filter((part): part is Extract<ChatMessagePart, { type: 'text' }> => part.type === 'text'),
       attachments: [],
       createdAt,
-      metadata: { custom: { attachmentRefs: message.attachmentRefs ?? [] } }
+      metadata: { custom: { attachmentRefs: message.attachmentRefs ?? [], ...reactionMeta } }
     } as ThreadMessage
   }
 
@@ -426,7 +423,7 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
       unstable_data: [],
       steps: [],
       // Carries ChatMessage.interim to AssistantMessage's footer gate.
-      custom: message.interim ? { interim: true } : {}
+      custom: { ...(message.interim ? { interim: true } : {}), ...reactionMeta }
     }
   } as ThreadMessage
 }

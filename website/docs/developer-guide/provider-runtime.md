@@ -42,6 +42,7 @@ That ordering matters because Hermes treats the saved model/provider choice as t
 
 Current provider families include (see `plugins/model-providers/` for the complete bundled set):
 
+- AI Gateway (Vercel)
 - OpenRouter
 - Nous Portal
 - OpenAI Codex
@@ -69,7 +70,7 @@ Current provider families include (see `plugins/model-providers/` for the comple
 - LM Studio
 - Tencent TokenHub
 - Custom (`provider: custom`) — first-class provider for any OpenAI-compatible endpoint
-- Named custom providers (`custom_providers` list in config.yaml)
+- Named custom providers (`providers:` dict in config.yaml; the legacy `custom_providers` list is still read for backward compatibility)
 
 ## Output of runtime resolution
 
@@ -92,13 +93,18 @@ This resolver is the main reason Hermes can share auth/runtime logic between:
 - ACP editor sessions
 - auxiliary model tasks
 
-## OpenRouter and custom OpenAI-compatible base URLs
+## AI Gateway
 
-Hermes contains logic to avoid leaking the wrong API key to a custom endpoint when multiple provider keys exist (e.g. `OPENROUTER_API_KEY` and `OPENAI_API_KEY`).
+Set `AI_GATEWAY_API_KEY` in `~/.hermes/.env` and run with `--provider ai-gateway`. Hermes fetches available models from the gateway's `/models` endpoint, filtering to language models with tool-use support.
+
+## OpenRouter, AI Gateway, and custom OpenAI-compatible base URLs
+
+Hermes contains logic to avoid leaking the wrong API key to a custom endpoint when multiple provider keys exist (e.g. `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, and `OPENAI_API_KEY`).
 
 Each provider's API key is scoped to its own base URL:
 
 - `OPENROUTER_API_KEY` is only sent to `openrouter.ai` endpoints
+- `AI_GATEWAY_API_KEY` is only sent to `ai-gateway.vercel.sh` endpoints
 - `OPENAI_API_KEY` is used for custom endpoints and as a fallback
 
 Hermes also distinguishes between:
@@ -109,7 +115,7 @@ Hermes also distinguishes between:
 That distinction is especially important for:
 
 - local model servers
-- non-OpenRouter OpenAI-compatible APIs
+- non-OpenRouter/non-AI Gateway OpenAI-compatible APIs
 - switching providers without re-running setup
 - config-saved custom endpoints that should keep working even when `OPENAI_BASE_URL` is not exported in the current shell
 
