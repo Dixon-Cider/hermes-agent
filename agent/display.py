@@ -1332,6 +1332,16 @@ def _trim_error(msg: str) -> str:
     return msg
 
 
+# A terminal result that is a plain string (no JSON, hence no exit_code) but
+# opens with an error/timeout marker. Anchored to the start so normal command
+# output that happens to contain the word "error" is not misread as a failure.
+_PLAIN_TERMINAL_FAILURE = re.compile(
+    r"\A\s*(?:error\b|exception\b|traceback\b|timed?\s*out\b|timeout\b)"
+    r"|\btimed out after\b|\bcommand timed out\b",
+    re.IGNORECASE,
+)
+
+
 def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
     """Inspect a tool result string for signs of failure.
 
@@ -1356,6 +1366,19 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
                 if err_msg:
                     return True, f" [{_trim_error(str(err_msg))}]"
                 return True, f" [exit {exit_code}]"
+            # A dict carrying an error but no exit_code (timeout/spawn failure:
+            # the command never ran, so there is no code to report).
+            if exit_code is None and data.get("error"):
+                return True, f" [{_trim_error(str(data['error']))}]"
+            return False, ""
+        # Non-JSON terminal result. Timeouts and launch failures surface as a
+        # plain string with no exit_code, and this branch used to return SUCCESS
+        # for them — which silently told the LARP guard (and the CLI's failure
+        # rendering) that a command that never ran had succeeded. Deliberately
+        # narrow: only a LEADING error/timeout marker, so ordinary stdout that
+        # merely mentions "error" further in is still a success.
+        if isinstance(result, str) and _PLAIN_TERMINAL_FAILURE.search(result[:200]):
+            return True, " [error]"
         return False, ""
 
     # Memory: distinguish "store full" from real errors.

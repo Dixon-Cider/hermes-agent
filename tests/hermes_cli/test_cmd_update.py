@@ -29,6 +29,15 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
         if "rev-list" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
 
+        # git remote get-url upstream  (does an `upstream` remote exist?)
+        # These fixtures model a fork that has NOT wired up an upstream remote,
+        # so this must fail — the blanket rc=0 fallback below would otherwise
+        # claim every fork has one. That distinction is load-bearing: with an
+        # upstream remote the updater merges upstream/main directly, without one
+        # it falls back to _sync_with_upstream_if_needed (issue #26172).
+        if "remote" in joined and "upstream" in joined:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
         # Fallback: return a successful CompletedProcess with empty stdout
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 

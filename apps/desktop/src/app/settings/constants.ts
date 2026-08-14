@@ -373,7 +373,16 @@ export const FREE_INPUT_KEYS = new Set([
 ])
 
 export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
+  loopDetection: {
+    enabled: 'Stop repetition loops'
+  },
+  larpDetection: {
+    enabled: 'Flag unperformed action claims',
+    judgeTierEnabled: 'LARP: extra LLM check (1 call)'
+  },
   model: 'Default Model',
+  // Dotted form: `model` above is a scalar label, so this cannot be nested.
+  'model.lmstudioLoadMode': 'LM Studio Load Mode',
   modelContextLength: 'Context Window',
   fallbackProviders: 'Fallback Models',
   toolsets: 'Enabled Toolsets',
@@ -542,6 +551,8 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
 
 export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
   model: 'Used for new chats unless you pick a different model in the composer.',
+  'model.lmstudioLoadMode':
+    'LM Studio only. "explicit" preloads the model up front; "jit" lets LM Studio load and evict it on demand — useful when one GPU is shared between several models.',
   modelContextLength: "Leave at 0 to use the selected model's detected context window.",
   fallbackProviders: 'Backup provider:model entries to try if the default model fails.',
   display: {
@@ -627,7 +638,7 @@ export const SECTIONS: DesktopConfigSection[] = [
     id: 'model',
     label: 'Model',
     icon: Box,
-    keys: ['model_context_length', 'fallback_providers']
+    keys: ['model_context_length', 'fallback_providers', 'model.lmstudio_load_mode']
   },
   {
     id: 'chat',
@@ -669,7 +680,10 @@ export const SECTIONS: DesktopConfigSection[] = [
       'security.allow_private_urls',
       'browser.allow_private_urls',
       'browser.auto_local_for_private_urls',
-      'checkpoints.enabled'
+      'checkpoints.enabled',
+      'loop_detection.enabled',
+      'larp_detection.enabled',
+      'larp_detection.judge_tier_enabled'
     ]
   },
   {

@@ -3633,6 +3633,10 @@ def compress_context(
         # rewrite on the same id) when compaction happened in place. See #38763.
         agent._last_compression_attempt_in_place = compacted_in_place
         agent._last_compaction_in_place = compacted_in_place
+        # LARPing spikes right after compaction (the summary reads as completed-
+        # action prose with the tool calls stripped, and the model imitates it).
+        # Mark the window so larp_detection.post_compaction_window can react.
+        agent._turns_since_compaction = 0
 
         # Keep the post-compression rough estimate for diagnostics, but do not
         # treat it as provider-reported prompt usage. Schema-heavy rough estimates

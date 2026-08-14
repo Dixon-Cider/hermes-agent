@@ -3952,6 +3952,72 @@ def run_conversation(
                 break  # Success, exit retry loop
 
             except InterruptedError:
+                # A repetition-loop abort reuses the interrupt path but sets
+                # agent._loop_detected. Recover instead of treating it as a user
+                # stop: discard the looped partial (NO history poisoning) and
+                # retry with a nudge, bounded by max_retries.
+                if getattr(agent, "_loop_detected", False):
+                    agent._loop_detected = False
+                    agent._interrupt_requested = False
+                    try:
+                        agent._current_streamed_assistant_text = ""
+                    except Exception:
+                        pass
+                    try:
+                        agent._reset_stream_delivery_tracking()
+                    except Exception:
+                        pass
+                    if thinking_spinner:
+                        thinking_spinner.stop("")
+                        thinking_spinner = None
+                    if agent.thinking_callback:
+                        agent.thinking_callback("")
+                    _ld_cfg = getattr(agent, "_loop_detection_cfg", None)
+                    _ld_max = getattr(_ld_cfg, "max_retries", 2) if _ld_cfg is not None else 2
+                    agent._loop_retry_count = getattr(agent, "_loop_retry_count", 0) + 1
+                    _ld_reason = getattr(agent, "_loop_detected_reason", "") or "repetition"
+                    agent._loop_guard_total = getattr(agent, "_loop_guard_total", 0) + 1
+                    logger.warning(
+                        "LOOP_GUARD: tripped reason=%r retry=%d/%d total=%d session=%s",
+                        _ld_reason, agent._loop_retry_count, _ld_max,
+                        agent._loop_guard_total, getattr(agent, "session_id", "?"),
+                    )
+                    # Surface the trip as an out-of-band notice so GUI drivers
+                    # (desktop toast, TUI status bar) show it — not just agent.log.
+                    from agent.credits_tracker import AgentNotice
+                    agent._emit_notice(AgentNotice(
+                        text=f"Loop guard stopped a repetition ({_ld_reason}).",
+                        level="warn", kind="ttl", ttl_ms=6000, key="guard.loop",
+                    ))
+                    if agent._loop_retry_count > _ld_max:
+                        logger.warning(
+                            "LOOP_GUARD: exhausted after %d retries; returning fallback. session=%s",
+                            _ld_max, getattr(agent, "session_id", "?"),
+                        )
+                        agent._loop_retry_count = 0
+                        final_response = (
+                            "I detected that I was repeating myself and could not produce a "
+                            "clean answer. Please rephrase or narrow the request."
+                        )
+                        messages.append({"role": "assistant", "content": final_response})
+                        agent._persist_session(messages, conversation_history)
+                        break
+                    try:
+                        agent._vprint(
+                            f"{agent.log_prefix}↻ Repetition loop detected ({_ld_reason}); "
+                            f"retrying {agent._loop_retry_count}/{_ld_max}.",
+                            force=True,
+                        )
+                    except Exception:
+                        pass
+                    # Steer the retry without breaking role alternation: the
+                    # helper piggybacks the nudge onto the trailing user/tool
+                    # message rather than appending a synthetic user turn (two
+                    # user turns in a row break strict chat templates).
+                    from agent.loop_detector import apply_loop_recovery_nudge
+                    apply_loop_recovery_nudge(messages)
+                    retry_count = 0
+                    continue
                 if thinking_spinner:
                     thinking_spinner.stop("")
                     thinking_spinner = None
@@ -7763,6 +7829,63 @@ def run_conversation(
                     # final_response while continuing so a later budget
                     # exhaustion path does not treat the narrated stop as
                     # a completed answer.
+                    _pending_verification_response = final_response
+                    _pending_verification_response_previewed = (
+                        agent._interim_content_was_streamed(final_response or "")
+                    )
+                    final_response = None
+                    continue
+
+                # ── LARP guard (opt-in, default OFF) ───────────────────
+                # If the model claimed an action but made no matching tool call
+                # this turn, re-prompt instead of finalizing. A claim alongside a
+                # FAILED tool is honest narration of a broken tool -> passes
+                # through. Bounded by max_reprompts.
+                try:
+                    from agent.larp_detection import (
+                        build_larp_nudge,
+                        larp_detection_enabled,
+                    )
+
+                    if larp_detection_enabled(agent=agent):
+                        _larp_nudge = build_larp_nudge(
+                            messages=messages,
+                            final_response=final_response,
+                            agent=agent,
+                            attempts=getattr(agent, "_larp_reprompts", 0),
+                        )
+                    else:
+                        _larp_nudge = None
+                except Exception:
+                    logger.debug("LARP detection check failed", exc_info=True)
+                    _larp_nudge = None
+
+                if _larp_nudge:
+                    agent._larp_reprompts = getattr(agent, "_larp_reprompts", 0) + 1
+                    final_msg["finish_reason"] = "larp_reprompt"
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": _larp_nudge,
+                        "_larp_reprompt_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    agent._larp_guard_total = getattr(agent, "_larp_guard_total", 0) + 1
+                    logger.warning(
+                        "LARP_GUARD: reprompt attempt=%d total=%d nudge=%r session=%s",
+                        agent._larp_reprompts, agent._larp_guard_total,
+                        _larp_nudge[:120], getattr(agent, "session_id", "?"),
+                    )
+                    # Surface the reprompt as an out-of-band notice (see loop guard).
+                    from agent.credits_tracker import AgentNotice
+                    agent._emit_notice(AgentNotice(
+                        text=f"LARP guard re-prompted the model (attempt {agent._larp_reprompts}).",
+                        level="warn", kind="ttl", ttl_ms=6000, key="guard.larp",
+                    ))
+                    # Same finalizer contract as verify-on-stop / kanban stop:
+                    # clear final_response while continuing so a later budget
+                    # exhaustion path does not treat the un-backed claim as a
+                    # completed answer.
                     _pending_verification_response = final_response
                     _pending_verification_response_previewed = (
                         agent._interim_content_was_streamed(final_response or "")

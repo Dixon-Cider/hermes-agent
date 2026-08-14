@@ -31,6 +31,7 @@ from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import FailoverReason
 from agent.errors import EmptyStreamError
+from agent.loop_detector import feed_content_delta, feed_reasoning_delta
 from agent.turn_context import substitute_api_content
 from agent.gemini_native_adapter import is_native_gemini_base_url
 from agent.model_metadata import is_local_endpoint
@@ -2777,6 +2778,23 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
 
+    # Per-call repetition-loop detectors (None when disabled -> zero overhead).
+    # Fed from every streaming path below (chat-completions deltas, Anthropic
+    # native text/thinking blocks); on a trip they reuse the interrupt abort path.
+    try:
+        from agent.loop_detector import (
+            build_reasoning_loop_detector,
+            build_stream_loop_detector,
+        )
+
+        agent._loop_detected = False
+        agent._loop_detected_reason = ""
+        agent._active_loop_detector = build_stream_loop_detector(agent)
+        agent._active_reasoning_loop_detector = build_reasoning_loop_detector(agent)
+    except Exception:
+        agent._active_loop_detector = None
+        agent._active_reasoning_loop_detector = None
+
     def _stream_final_text(response) -> str:
         try:
             choices = getattr(response, "choices", None)
@@ -2919,6 +2937,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     return raw_response.get("stream", [])
 
                 def _on_text(text):
+                    feed_content_delta(agent, text)
                     _fire_first()
                     agent._fire_stream_delta(text)
                     deltas_were_sent["yes"] = True
@@ -2928,6 +2947,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     agent._fire_tool_gen_started(name)
 
                 def _on_reasoning(text):
+                    feed_reasoning_delta(agent, text)
                     _fire_first()
                     agent._fire_reasoning_delta(text)
 
@@ -3555,12 +3575,18 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     reasoning_text,
                 )
                 reasoning_parts.append(reasoning_text)
+                # Reasoning-trace loop detection. On a trip this reuses the
+                # interrupt/abort path; the conversation loop discards the
+                # looped partial and re-prompts.
+                feed_reasoning_delta(agent, reasoning_text)
                 _fire_first_delta()
                 agent._fire_reasoning_delta(reasoning_text)
 
             # Accumulate text content — fire callback only when no tool calls
             if delta and delta.content:
                 content_parts.append(delta.content)
+                # Repetition-loop detection (content channel).
+                feed_content_delta(agent, delta.content)
                 if not tool_calls_acc:
                     _fire_first_delta()
                     agent._fire_stream_delta(delta.content)
@@ -3984,6 +4010,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         delta_type = getattr(delta, "type", None)
                         if delta_type == "text_delta":
                             text = getattr(delta, "text", "")
+                            # Loop detection runs on the native Anthropic text
+                            # channel too — fed before the display-suppression
+                            # check so a tool-use turn is still guarded.
+                            if text:
+                                feed_content_delta(agent, text)
                             if text and not has_tool_use:
                                 _fire_first_delta()
                                 agent._fire_stream_delta(text)
@@ -3991,6 +4022,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         elif delta_type == "thinking_delta":
                             thinking_text = getattr(delta, "thinking", "")
                             if thinking_text:
+                                feed_reasoning_delta(agent, thinking_text)
                                 _fire_first_delta()
                                 agent._fire_reasoning_delta(thinking_text)
             if not agent._interrupt_requested:

@@ -5182,6 +5182,7 @@ from hermes_cli.update_cmd import (  # noqa: F401
     _ensure_uv_for_termux,
     _finish_dashboard_update_cleanup,
     _for_each_systemd_gateway_unit,
+    _fork_merge_upstream,
     _format_concurrent_instances_message,
     _format_time_ago,
     _format_venv_python_holders_message,
