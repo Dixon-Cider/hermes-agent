@@ -38,8 +38,33 @@ def _fake_cli(tmp_path, body):
 
 
 class TestModeDetection:
-    def test_off_by_default(self, monkeypatch):
+    def test_default_on_when_cli_available(self, monkeypatch):
+        """Backend unset: Browser Use mode is the default when the CLI runs."""
         monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is True
+
+    def test_default_off_when_cli_unavailable(self, monkeypatch):
+        """Backend unset + no runnable CLI: keep the built-in browser tools."""
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        assert bu_cli.is_browser_use_cli_mode() is False
+
+    def test_explicit_off_wins_over_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"backend": bu_cli.BACKEND_DISABLED}},
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is False
+
+    def test_yaml_bool_off_means_disabled(self, monkeypatch):
+        """YAML 1.1 parses unquoted `off` as False — must mean disabled."""
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"backend": False}},
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
         assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_config_opt_in(self, monkeypatch):
@@ -56,12 +81,47 @@ class TestModeDetection:
         )
         assert bu_cli.is_browser_use_cli_mode() is False
 
-    def test_config_read_failure_fails_safe(self, monkeypatch):
+    def test_config_read_failure_uses_default(self, monkeypatch):
         def boom():
             raise RuntimeError("config unreadable")
 
         monkeypatch.setattr("hermes_cli.config.read_raw_config", boom)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
+
+
+class TestSubprocessEnvironment:
+    def test_browser_use_telemetry_defaults_off(self, monkeypatch):
+        import sys
+        from types import ModuleType
+
+        browser_tool = ModuleType("tools.browser_tool")
+        browser_tool._build_browser_env = lambda: {}
+        monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
+        env = bu_cli._base_subprocess_env()
+        assert env["ANONYMIZED_TELEMETRY"] == "false"
+
+    def test_subprocess_env_strips_parent_python_import_paths(self, monkeypatch):
+        """#83427/#84841/#86006/#86104: the browser-use CLI runs under its
+        own Python — inherited PYTHONPATH/PYTHONHOME pointing at Hermes's
+        venv make it import wrong-ABI C-extensions (pydantic_core) and
+        crash. Both must be stripped; unrelated vars survive."""
+        import sys
+        from types import ModuleType
+
+        browser_tool = ModuleType("tools.browser_tool")
+        browser_tool._build_browser_env = lambda: {
+            "PYTHONPATH": "/hermes:/hermes/venv/lib/site-packages",
+            "PYTHONHOME": "/hermes/venv",
+            "KEEP_ME": "yes",
+        }
+        monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
+
+        env = bu_cli._base_subprocess_env()
+
+        assert "PYTHONPATH" not in env
+        assert "PYTHONHOME" not in env
+        assert env["KEEP_ME"] == "yes"
 
 
 class TestToolSurfaceSwap:
@@ -119,23 +179,26 @@ class TestToolSurfaceSwap:
 
 
 class TestFindCli:
+    """The tests/tools conftest pins _find_cli to None (host isolation);
+    exercise the real function via the preserved _find_cli_unpatched."""
+
     def test_prefers_installed_binary(self, monkeypatch):
         monkeypatch.setattr(
             bu_cli.shutil, "which",
-            lambda name: "/usr/local/bin/browser-use" if name == "browser-use" else "/usr/local/bin/uvx",
+            lambda name, path=None: "/usr/local/bin/browser-use" if name == "browser-use" and path is None else ("/usr/local/bin/uvx" if path is None else None),
         )
-        assert bu_cli._find_cli() == ["/usr/local/bin/browser-use"]
+        assert bu_cli._find_cli_unpatched() == ["/usr/local/bin/browser-use"]
 
     def test_falls_back_to_uvx(self, monkeypatch):
         monkeypatch.setattr(
             bu_cli.shutil, "which",
-            lambda name: "/usr/local/bin/uvx" if name == "uvx" else None,
+            lambda name, path=None: "/usr/local/bin/uvx" if name == "uvx" and path is None else None,
         )
-        assert bu_cli._find_cli() == ["/usr/local/bin/uvx", "browser-use"]
+        assert bu_cli._find_cli_unpatched() == ["/usr/local/bin/uvx", "browser-use"]
 
     def test_none_when_neither_available(self, monkeypatch):
-        monkeypatch.setattr(bu_cli.shutil, "which", lambda name: None)
-        assert bu_cli._find_cli() is None
+        monkeypatch.setattr(bu_cli.shutil, "which", lambda name, path=None: None)
+        assert bu_cli._find_cli_unpatched() is None
 
 
 class TestLegacyCloudMigration:
@@ -156,10 +219,12 @@ class TestLegacyCloudMigration:
             lambda: {"browser": {"cloud_provider": "browser-use", "use_gateway": True}},
         )
         monkeypatch.setenv("BROWSER_USE_API_KEY", "bu-key")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_no_api_key_stays_on_legacy_path(self, monkeypatch):
         monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: self._LEGACY)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_camofox_user_does_not_migrate(self, monkeypatch):
@@ -201,6 +266,7 @@ class TestLegacyCloudMigration:
             lambda: {"browser": {"cloud_provider": "browserbase"}},
         )
         monkeypatch.setenv("BROWSER_USE_API_KEY", "bu-key")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_explicit_local_does_not_migrate(self, monkeypatch):
@@ -209,6 +275,7 @@ class TestLegacyCloudMigration:
             lambda: {"browser": {"cloud_provider": "local"}},
         )
         monkeypatch.setenv("BROWSER_USE_API_KEY", "bu-key")
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_auto_detect_with_key_migrates(self, monkeypatch):
@@ -222,7 +289,9 @@ class TestLegacyCloudMigration:
         assert bu_cli.is_browser_use_cli_mode() is True
 
     def test_auto_detect_without_key_does_not_migrate(self, monkeypatch):
+        """No key, no CLI: nothing to migrate and no default flip."""
         monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_migrated_config_gets_bu_autospawn(self, tmp_path, monkeypatch):
@@ -388,7 +457,7 @@ class TestProviderPickerIntegration:
         assert config["browser"]["backend"] == "browser-use"
         assert config["browser"]["cloud_provider"] == "local"
 
-    def test_provider_row_stays_active_alongside_cli_mode(self):
+    def test_provider_row_stays_active_alongside_cli_mode(self, monkeypatch):
         from hermes_cli.tools_config import _is_provider_active
 
         cli_row = next(r for r in self._rows() if r.get("browser_backend"))
@@ -401,9 +470,20 @@ class TestProviderPickerIntegration:
         # driver attaches to.
         assert _is_provider_active(local_row, cli_config) is True
 
-        local_config = {"browser": {"cloud_provider": "local"}}
-        assert _is_provider_active(cli_row, local_config) is False
-        assert _is_provider_active(local_row, local_config) is True
+        # Explicit off: the CLI row must not highlight even with the CLI
+        # installed (default-on only applies while backend is unset).
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        off_config = {"browser": {"cloud_provider": "local", "backend": "off"}}
+        assert _is_provider_active(cli_row, off_config) is False
+        assert _is_provider_active(local_row, off_config) is True
+
+        # Backend unset: default-on — the CLI row highlights when the CLI
+        # is runnable, and not when it isn't.
+        default_config = {"browser": {"cloud_provider": "local"}}
+        assert _is_provider_active(cli_row, default_config) is True
+        assert _is_provider_active(local_row, default_config) is True
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        assert _is_provider_active(cli_row, default_config) is False
 
 
 class TestBrowserUseSlashCommand:
@@ -645,3 +725,207 @@ class TestBrowserExec:
         monkeypatch.setattr(bu_cli, "_MIN_TIMEOUT_S", 1)
         result = json.loads(bu_cli.browser_exec("print(1)", timeout_s=1))
         assert "timed out" in result["error"]
+
+
+class TestFindCliManagedBin:
+    """MANAGED-FIRST: _find_cli probes $HERMES_HOME/bin before PATH and
+    ~/.local/bin, so the Hermes-installed copy always wins."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_home(self, tmp_path, monkeypatch):
+        """Pin HOME so the ~/.local/bin probe can't leak the host's real
+        user-level installs into these real-PATH-probing tests."""
+        monkeypatch.setenv("HOME", str(tmp_path / "userhome"))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    def test_managed_bin_browser_use_found(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "home" / "bin"
+        bin_dir.mkdir(parents=True)
+        bu = bin_dir / "browser-use"
+        bu.write_text("#!/bin/sh\n")
+        bu.chmod(bu.stat().st_mode | stat.S_IXUSR)
+        assert bu_cli._find_cli_unpatched() == [str(bu)]
+
+    def test_managed_bin_uvx_fallback(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "home" / "bin"
+        bin_dir.mkdir(parents=True)
+        uvx = bin_dir / "uvx"
+        uvx.write_text("#!/bin/sh\n")
+        uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
+        assert bu_cli._find_cli_unpatched() == [str(uvx), "browser-use"]
+
+    def test_nothing_found(self, tmp_path, monkeypatch):
+        assert bu_cli._find_cli_unpatched() is None
+
+    def test_user_local_bin_browser_use_found(self, tmp_path, monkeypatch):
+        """#83788: Desktop/TUI workers spawn with a minimal PATH that omits
+        ~/.local/bin, where `uv tool install browser-use` links the binary
+        by default — _find_cli must probe it explicitly."""
+        cli_dir = tmp_path / "userhome" / ".local" / "bin"
+        cli_dir.mkdir(parents=True)
+        cli = cli_dir / "browser-use"
+        cli.write_text("#!/bin/sh\n")
+        cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+        assert bu_cli._find_cli_unpatched() == [str(cli)]
+
+    def test_managed_bin_precedes_user_local_bin(self, tmp_path, monkeypatch):
+        """MANAGED-FIRST: Hermes' managed copy wins over a user-level side
+        install — every backend selection provisions/updates the managed
+        copy, so resolution must land on the binary we control (no version
+        drift from stray `uv tool install` runs)."""
+        user_dir = tmp_path / "userhome" / ".local" / "bin"
+        user_dir.mkdir(parents=True)
+        user_cli = user_dir / "browser-use"
+        user_cli.write_text("#!/bin/sh\n")
+        user_cli.chmod(user_cli.stat().st_mode | stat.S_IXUSR)
+        managed_dir = tmp_path / "home" / "bin"
+        managed_dir.mkdir(parents=True)
+        managed_cli = managed_dir / "browser-use"
+        managed_cli.write_text("#!/bin/sh\n")
+        managed_cli.chmod(managed_cli.stat().st_mode | stat.S_IXUSR)
+        assert bu_cli._find_cli_unpatched() == [str(managed_cli)]
+
+    def test_managed_bin_precedes_path(self, tmp_path, monkeypatch):
+        """MANAGED-FIRST: the managed copy also wins over one on PATH."""
+        path_dir = tmp_path / "onpath"
+        path_dir.mkdir()
+        path_cli = path_dir / "browser-use"
+        path_cli.write_text("#!/bin/sh\n")
+        path_cli.chmod(path_cli.stat().st_mode | stat.S_IXUSR)
+        monkeypatch.setenv("PATH", str(path_dir))
+        managed_dir = tmp_path / "home" / "bin"
+        managed_dir.mkdir(parents=True)
+        managed_cli = managed_dir / "browser-use"
+        managed_cli.write_text("#!/bin/sh\n")
+        managed_cli.chmod(managed_cli.stat().st_mode | stat.S_IXUSR)
+        assert bu_cli._find_cli_unpatched() == [str(managed_cli)]
+
+    def test_user_local_bin_uvx_fallback(self, tmp_path, monkeypatch):
+        cli_dir = tmp_path / "userhome" / ".local" / "bin"
+        cli_dir.mkdir(parents=True)
+        uvx = cli_dir / "uvx"
+        uvx.write_text("#!/bin/sh\n")
+        uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
+        assert bu_cli._find_cli_unpatched() == [str(uvx), "browser-use"]
+
+
+class TestInstallCli:
+    def test_path_install_does_not_short_circuit(self, tmp_path, monkeypatch):
+        """MANAGED-FIRST: a browser-use on PATH is a user-level side install
+        and must NOT satisfy install_cli() — only the managed copy does,
+        otherwise resolution stays pinned to a binary Hermes can't update."""
+        cli = _fake_cli(tmp_path, "")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(bu_cli.shutil, "which", lambda name, path=None: cli if name == "browser-use" and path is None else None)
+        import sys as _sys
+        import types as _types
+        fake = _types.ModuleType("hermes_cli.managed_uv")
+        fake.ensure_uv = lambda **kw: None
+        monkeypatch.setitem(_sys.modules, "hermes_cli.managed_uv", fake)
+        ok, msg = bu_cli.install_cli()
+        # No uv available in this fixture, so the attempted managed install
+        # fails — the point is that the PATH copy did not short-circuit.
+        assert ok is False
+        assert "already installed" not in msg
+
+    def test_already_installed_in_managed_bin(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "home" / "bin"
+        bin_dir.mkdir(parents=True)
+        cli = bin_dir / "browser-use"
+        cli.write_text("#!/bin/sh\n")
+        cli.chmod(cli.stat().st_mode | stat.S_IXUSR)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        ok, msg = bu_cli.install_cli()
+        assert ok is True
+        assert "already installed" in msg
+
+    def test_no_uv_anywhere_fails_with_guidance(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        import sys as _sys
+        import types as _types
+        fake = _types.ModuleType("hermes_cli.managed_uv")
+        fake.ensure_uv = lambda **kw: None
+        monkeypatch.setitem(_sys.modules, "hermes_cli.managed_uv", fake)
+        ok, msg = bu_cli.install_cli()
+        assert ok is False
+        assert "uv" in msg
+
+    def test_successful_install_via_fake_uv(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        bin_dir = home / "bin"
+        bin_dir.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        # install_cli verifies via _find_cli(), which the tests/tools conftest
+        # pins to None — restore the real resolver for this test.
+        monkeypatch.setattr(bu_cli, "_find_cli", bu_cli._find_cli_unpatched)
+        # fake uv: `uv tool install browser-use` drops a binary into UV_TOOL_BIN_DIR.
+        # Absolute /bin/chmod: PATH is emptied above, so bare chmod won't resolve.
+        uv = tmp_path / "uv"
+        uv.write_text(
+            "#!/bin/sh\n"
+            'target="$UV_TOOL_BIN_DIR/browser-use"\n'
+            'echo "#!/bin/sh" > "$target"\n'
+            '/bin/chmod +x "$target"\n'
+        )
+        uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+        import sys as _sys
+        import types as _types
+        fake = _types.ModuleType("hermes_cli.managed_uv")
+        fake.ensure_uv = lambda **kw: str(uv)
+        monkeypatch.setitem(_sys.modules, "hermes_cli.managed_uv", fake)
+        ok, msg = bu_cli.install_cli()
+        assert ok is True, msg
+        assert (bin_dir / "browser-use").exists()
+
+    def test_failed_install_surfaces_stderr_tail(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        uv = tmp_path / "uv"
+        uv.write_text('#!/bin/sh\necho "no network" >&2\nexit 1\n')
+        uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+        import sys as _sys
+        import types as _types
+        fake = _types.ModuleType("hermes_cli.managed_uv")
+        fake.ensure_uv = lambda **kw: str(uv)
+        monkeypatch.setitem(_sys.modules, "hermes_cli.managed_uv", fake)
+        ok, msg = bu_cli.install_cli()
+        assert ok is False
+        assert "no network" in msg
+
+
+class TestDefaultDowngradeNotice:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+
+    def test_notice_when_default_and_cli_missing(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        notice = bu_cli.default_downgrade_notice()
+        assert notice is not None
+        assert "hermes tools" in notice
+
+    def test_rate_limited_within_24h(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        assert bu_cli.default_downgrade_notice() is not None
+        assert bu_cli.default_downgrade_notice() is None
+
+    def test_no_notice_when_cli_runnable(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        assert bu_cli.default_downgrade_notice() is None
+
+    def test_no_notice_on_explicit_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"backend": bu_cli.BACKEND_DISABLED}},
+        )
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
+        assert bu_cli.default_downgrade_notice() is None
