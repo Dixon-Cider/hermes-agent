@@ -57,6 +57,37 @@ class TestDetectToolFailureTerminal:
         assert suffix.startswith(" [")
         assert suffix.endswith("]")
 
+    def test_error_without_exit_code_is_a_failure(self):
+        # A timeout/spawn failure never runs the command, so there is no exit
+        # code to report — but it is emphatically not a success.
+        result = json.dumps({"output": "", "error": "command timed out after 180s"})
+        is_failure, suffix = _detect_tool_failure("terminal", result)
+        assert is_failure is True
+        assert "timed out" in suffix
+
+    def test_plain_string_timeout_is_a_failure(self):
+        # Regression: non-JSON terminal results used to short-circuit to
+        # (False, "") — reporting a command that never ran as succeeded, which
+        # in turn told the LARP guard the turn was grounded.
+        for result in (
+            "Error: command timed out after 180s",
+            "timed out after 120s: session.compress",
+            "Timeout waiting for process to start",
+            "Traceback (most recent call last):\n  File ...",
+        ):
+            is_failure, _ = _detect_tool_failure("terminal", result)
+            assert is_failure is True, result
+
+    def test_plain_string_output_mentioning_error_is_still_success(self):
+        # Narrowness check: the marker must LEAD the output, otherwise ordinary
+        # stdout ("0 errors", a linter summary) would be misread as a failure.
+        for result in (
+            "Build finished with 0 errors, 2 warnings",
+            "tests: 41 passed\nno errors detected",
+            "ok\n",
+        ):
+            assert _detect_tool_failure("terminal", result) == (False, ""), result
+
 
 
 

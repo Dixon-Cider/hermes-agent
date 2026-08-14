@@ -634,6 +634,20 @@ DEFAULT_CONFIG = {
     "larp_detection": {
         "enabled": False,               # OPT-IN: flag when the model claims an action it didn't perform
         "judge_tier_enabled": False,    # opt-in: extra LLM check for ambiguous outcome claims
+        # Route intent announcements ("Now launching X") to the judge as well,
+        # not just outcome-specific claims. This is the only shape the
+        # deterministic tiers cannot settle: a successful but UNRELATED tool call
+        # grounds the turn under rule (c), so it takes a semantic check to see
+        # that focusing a pane is not launching anything. Costs one aux-LLM call
+        # per announcement turn — set False if your aux backend is slow.
+        "judge_intent_claims": True,
+        # A claim must be backed by a tool that actually SUCCEEDED. When every
+        # substantive call this turn fails, the model tends to stop reporting the
+        # failure and start narrating the next step as if it ran — the guard's
+        # old blind spot. Past-tense claims that acknowledge the failure still
+        # pass; intent announcements ("Now launching X") never do. Set False to
+        # restore the old pass-on-any-tool-activity behavior.
+        "require_success": True,
         "max_reprompts": 2,
         "exempt_toolsets": [],          # add tool-name tokens (e.g. "memory","todo") to make detection stricter
         "post_compaction_window": 0,    # opt-in: run the guard for N turns after each compaction even if disabled (LARP spikes post-compaction)

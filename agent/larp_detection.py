@@ -5,15 +5,37 @@ turn and, when the model asserts it performed an action but made **no** matching
 (substantive) tool call, returns a corrective nudge so the conversation loop
 re-prompts instead of finalizing.
 
-Three-way contract:
+Four-way contract:
   (a) action-claim + ZERO substantive tool calls this turn -> TRUE LARP -> re-prompt
-  (b) action-claim + a substantive tool that FAILED         -> honest narration of a
-      broken tool -> pass through (the error is already in context; do not punish)
+  (b) action-claim + substantive calls but NONE succeeded  -> nothing actually
+      performed the action. Re-prompt UNLESS the message itself owns the failure
+      (see below). Governed by ``larp_detection.require_success`` (default True).
   (c) action-claim + a successful substantive tool          -> pass through
+  (d) any of the above + Tier-2 judge says an outcome-specific claim, or an
+      INTENT announcement, is ungrounded -> re-prompt. Intent announcements need
+      the judge because a successful but UNRELATED tool call satisfies (c):
+      "Terminal pane focused. Now launching the classifier." looks grounded to
+      every deterministic check, and only a semantic one sees that focusing a
+      pane launches nothing.
+
+(b) is the highest-value catch and used to be the guard's blind spot: when every
+tool this turn fails, the model tends to stop reporting the failure and start
+narrating the next step as though it had run ("Terminal focused. Now launching
+X."). The old rule passed that through on the theory that a failed tool is
+honest narration — true only when the message SAYS so. So the suppression is
+narrowed to exactly that case:
+
+  * an INTENT announcement ("Now launching X") is never grounded by a failed
+    tool — it is a promise that ended the turn -> always re-prompt;
+  * a past-tense COMPLETION claim ("I updated the file") is honest only if the
+    message acknowledges the failure -> pass when it does, re-prompt when it
+    silently asserts success a failed tool never delivered.
 
 Disabled by default (opt-in); see ``DEFAULT_CONFIG["larp_detection"]``.
 Tier-2 (an LLM judge for outcome-specific claims) is a further opt-in and fails
-open (never re-prompts on error).
+open (never re-prompts on error). It runs on any turn with tool activity — NOT
+only successful ones, or it would switch itself off exactly when the tools are
+broken and the LARP risk is highest.
 """
 
 from __future__ import annotations
@@ -64,11 +86,17 @@ _CLAIM_PATTERNS = [
 # tool: "I am proceeding with X now.", "Executing now.", "Proceeding with
 # dispatch...". (Deliberately excludes status words like "waiting"/"processing".)
 _ACTION_GERUNDS = (
-    "proceeding|executing|dispatching|initiating|starting|running|creating|"
-    "fixing|correcting|continuing|beginning|generating|building|deploying|"
-    "uploading|downloading|fetching|searching|updating|writing|saving|"
-    "ingesting|installing|committing|pushing|sending|applying|implementing|"
-    "rewriting|recreating|moving|kicking\s+off"
+    r"proceeding|executing|dispatching|initiating|starting|running|creating|"
+    r"fixing|correcting|continuing|beginning|generating|building|deploying|"
+    r"uploading|downloading|fetching|searching|updating|writing|saving|"
+    r"ingesting|installing|committing|pushing|sending|applying|implementing|"
+    r"rewriting|recreating|moving|kicking\s+off|"
+    # Launch/dispatch family: the dominant real-world form when a tool just
+    # failed and the model promises a retry it never issues ("Launching it in
+    # the background now.", "Spawning the job now...", "Re-running now.").
+    r"launching|relaunching|spawning|restarting|rerunning|re-running|retrying|"
+    r"reattempting|re-attempting|opening|scheduling|queueing|queuing|triggering|"
+    r"invoking|submitting|syncing|cloning|pulling|refreshing|exporting|importing"
 )
 
 # "narrate then stop": the message END announces intent instead of doing it.
@@ -78,7 +106,15 @@ _ACTION_GERUNDS = (
 # after "I am" so states ("I am unable/ready/done/sorry") don't match.
 _NARRATE_THEN_STOP = re.compile(
     r"\bI(?:'ll|\s+will)\s+\w+"
-    r"|\bI(?:'m|\s+am)\s+(?:now\s+|currently\s+)?(?:going\s+to\s+\w+|\w+ing\b)",
+    r"|\bI(?:'m|\s+am)\s+(?:now\s+|currently\s+)?(?:going\s+to\s+\w+|\w+ing\b)"
+    # "Let me launch it in the background" — first-person imperative intent.
+    # "Let me know ..." is the opposite (handing control back), so it is excluded
+    # here as well as by _CONDITIONAL_LEAD.
+    r"|\blet me\s+(?!know\b|see\s+if\b)\w+"
+    # "Now launching the classifier so you can watch." — the leading-"now" form.
+    # _TERMINAL_ACTION only matches when the marker TRAILS the sentence, so a
+    # purpose clause after the verb ("...so you can watch") used to escape both.
+    r"|\bnow\s+(?:" + _ACTION_GERUNDS + r")\b",
     re.IGNORECASE,
 )
 
@@ -106,6 +142,18 @@ _TERMINAL_ACTION = re.compile(
 
 # Modal/conditional words right before a verb that make it NOT a completion claim.
 _MODAL_PREFIX = re.compile(r"\b(can|could|should|would|might|may|need to|try to|plan to)\s*$", re.IGNORECASE)
+
+# The message OWNS a failure: it tells the user something went wrong. A past-tense
+# claim alongside this is honest narration of a broken tool ("I ran the tests and
+# they errored"), not a LARP — so contract (b) passes it through. Deliberately
+# does NOT rescue intent announcements: "it timed out, now launching it in the
+# background" acknowledges the old failure while still promising unperformed work.
+_ACK_FAILURE = re.compile(
+    r"\b(?:fail(?:ed|ing|s|ure)?|error(?:ed|s)?|timed\s*out|timeout|unable\s+to|"
+    r"could\s*n[o']t|cannot|can'?t|refused|denied|unreachable|not\s+reachable|"
+    r"broke|broken|did\s*n[o']t\s+work|no\s+such|rejected|blocked)\b",
+    re.IGNORECASE,
+)
 
 
 def _section(config: Optional[dict]) -> dict:
@@ -167,7 +215,20 @@ def _is_substantive(name: str, exempt: set[str]) -> bool:
     return not any(tok in n for tok in exempt)
 
 
-def _first_claim(text: str) -> Optional[str]:
+def _acknowledges_failure(text: str) -> bool:
+    """Whether the message tells the user something went wrong this turn."""
+    return bool(_ACK_FAILURE.search(text or ""))
+
+
+def _first_claim_with_kind(text: str) -> Optional[tuple[str, str]]:
+    """Like :func:`_first_claim` but also reports which KIND of claim matched:
+
+    ``"completed"`` - past-tense/bare completion assertion ("I updated the file")
+    ``"intent"``    - narrate-then-stop / bare terminal action ("Now launching X")
+
+    The distinction matters only for contract (b): a failed tool can make a
+    completion claim honest, but never makes an intent announcement performed.
+    """
     for pat in _CLAIM_PATTERNS:
         m = pat.search(text)
         if not m:
@@ -175,7 +236,7 @@ def _first_claim(text: str) -> Optional[str]:
         prefix = text[max(0, m.start() - 16) : m.start()]
         if _MODAL_PREFIX.search(prefix):
             continue
-        return text[m.start() : m.start() + 140].strip()
+        return text[m.start() : m.start() + 140].strip(), "completed"
     # Intent-announcement (narrate-then-stop / bare terminal action) counts only
     # at the END of the message — and NOT when the message ends by asking the
     # user ("Want me to X now?" / "... now?"), which is correct stop-to-confirm
@@ -196,7 +257,13 @@ def _first_claim(text: str) -> Optional[str]:
     before = tail[: m.start()]
     if "?" in before or _CONDITIONAL_LEAD.search(before):
         return None
-    return tail[m.start() : m.start() + 140].strip()
+    return tail[m.start() : m.start() + 140].strip(), "intent"
+
+
+def _first_claim(text: str) -> Optional[str]:
+    """Back-compat wrapper: the claim text only, without its kind."""
+    found = _first_claim_with_kind(text)
+    return found[0] if found else None
 
 
 def _looks_specific(claim: str) -> bool:
@@ -254,9 +321,19 @@ def _turn_tool_activity(messages: list, exempt: set[str]) -> tuple[bool, bool, b
     return made, any_success, any_fail
 
 
-def _judge_ungrounded(messages: list, final_response: str, claim: str) -> bool:
+def _judge_ungrounded(
+    messages: list, final_response: str, claim: str, kind: str = "completed"
+) -> bool:
     """Tier-2: one cheap aux-LLM check. Returns True only on a confident UNGROUNDED
-    verdict; fails open (False) on any error."""
+    verdict; fails open (False) on any error.
+
+    *kind* selects the question asked. "completed" audits whether a past-tense
+    claim is supported by the tool results. "intent" audits whether the ANNOUNCED
+    action was actually carried out — a different judgement, because a present
+    -progressive narration of work a tool really did ("I am dispatching the
+    sub-agents now" + a delegate call) is legitimate, while the same sentence
+    with only an adjacent tool call is the LARP.
+    """
     try:
         from agent.auxiliary_client import call_llm
 
@@ -267,15 +344,28 @@ def _judge_ungrounded(messages: list, final_response: str, claim: str) -> bool:
                 c = m.get("content")
                 tool_lines.append(f"- {m.get('name') or m.get('tool_name')}: {str(c)[:300]}")
         tool_summary = "\n".join(tool_lines[:20]) or "(no tool results this turn)"
-        sys = (
-            "You audit whether an assistant's claims of completed actions are GROUNDED "
-            "in the tool results from this turn. Reply with exactly one word: GROUNDED "
-            "or UNGROUNDED."
-        )
+        if kind == "intent":
+            sys = (
+                "You audit whether the action an assistant ANNOUNCED was actually carried "
+                "out by one of this turn's tool calls. Narrating work a tool really did is "
+                "fine — answer GROUNDED. Announcing work and ending the turn without a tool "
+                "call that performs it is a failure — answer UNGROUNDED. A tool call that "
+                "only does something ADJACENT to the announced action (opening or focusing "
+                "a window, reading a file, checking status) does NOT count as performing it. "
+                "Reply with exactly one word: GROUNDED or UNGROUNDED."
+            )
+            check = f"Specifically check this announced action: {claim[:200]}"
+        else:
+            sys = (
+                "You audit whether an assistant's claims of completed actions are GROUNDED "
+                "in the tool results from this turn. Reply with exactly one word: GROUNDED "
+                "or UNGROUNDED."
+            )
+            check = f"Specifically check this claim: {claim[:200]}"
         usr = (
             f"Assistant final message:\n{final_response[:1500]}\n\n"
             f"Tool results this turn:\n{tool_summary[:2000]}\n\n"
-            f"Specifically check this claim: {claim[:200]}"
+            f"{check}"
         )
         resp = call_llm(
             task="larp_detection",
@@ -291,15 +381,27 @@ def _judge_ungrounded(messages: list, final_response: str, claim: str) -> bool:
         return False
 
 
-def _nudge(claim: str, *, specific: bool) -> str:
-    extra = (
-        " Your claim references a specific result that the tool outputs do not support."
-        if specific
-        else ""
+def _nudge(claim: str, *, specific: bool, failed: bool = False, announced: bool = False) -> str:
+    if specific:
+        extra = " Your claim references a specific result that the tool outputs do not support."
+    elif announced:
+        # The tool calls this turn did something ADJACENT — saying "no tool call
+        # was made" would read as false to the model and invite an argument
+        # instead of the action.
+        extra = " No tool call in this turn performed the action you announced."
+    else:
+        extra = ""
+    # (b) vs (a): distinguish "you never called anything" from "everything you
+    # called errored", so the model corrects the right thing — retrying blindly
+    # when the tool is broken is exactly the loop we want to avoid.
+    grounding = (
+        "every tool call this turn failed, so nothing actually performed it"
+        if failed
+        else "no corresponding tool call was made this turn"
     )
     return (
         "[System: In your previous message you indicated you completed an action "
-        f'("{claim[:120]}") but no corresponding tool call was made this turn.{extra} '
+        f'("{claim[:120]}") but {grounding}.{extra} '
         "Either perform the action now using the appropriate tool, or clearly state that "
         "you did not/cannot do it and why. Do not report actions as done unless a tool "
         "call actually performed them.]"
@@ -321,19 +423,44 @@ def build_larp_nudge(
     text = (final_response or "").strip()
     if not text:
         return None
-    claim = _first_claim(text)
-    if not claim:
+    found = _first_claim_with_kind(text)
+    if not found:
         return None
+    claim, kind = found
 
     exempt = _exempt_tokens(config)
-    made, any_success, _any_fail = _turn_tool_activity(messages, exempt)
+    made, any_success, any_fail = _turn_tool_activity(messages, exempt)
 
     if made:
-        # (b)/(c): real tool activity backs (or honestly fails) the turn -> pass,
-        # unless the opt-in judge says an outcome-specific claim is ungrounded.
-        if _flag(sec, "judge_tier_enabled", False) and any_success and _looks_specific(claim):
-            if _judge_ungrounded(messages, text, claim):
-                return _nudge(claim, specific=True)
+        # (b): calls were made but NONE succeeded, so nothing performed the
+        # claimed action. Only a past-tense claim that OWNS the failure is honest
+        # narration; an intent announcement is a promise no failed tool can keep.
+        if _flag(sec, "require_success", True) and not any_success:
+            if kind == "intent" or not _acknowledges_failure(text):
+                return _nudge(claim, specific=False, failed=any_fail)
+
+        # (d): Tier-2 runs on ANY turn with tool activity. Gating it on
+        # any_success would disable it precisely when every tool is failing —
+        # the highest-LARP-risk state there is.
+        #
+        # Intent announcements are routed here too (judge_intent_claims): they
+        # are the one shape the deterministic tiers cannot settle, because a
+        # SUCCESSFUL but unrelated call satisfies (c). "Terminal pane focused.
+        # Now launching the classifier." is grounded by the focus call as far as
+        # tier-1 can tell; only a semantic check sees that focusing a pane is not
+        # launching anything. Costs one aux call per announcement turn, so it is
+        # separately switchable for slow/saturated aux backends.
+        judge_intent = kind == "intent" and _flag(sec, "judge_intent_claims", True)
+        if _flag(sec, "judge_tier_enabled", False) and (_looks_specific(claim) or judge_intent):
+            if _judge_ungrounded(messages, text, claim, kind=kind):
+                return _nudge(
+                    claim,
+                    specific=_looks_specific(claim),
+                    failed=any_fail and not any_success,
+                    announced=kind == "intent",
+                )
+
+        # (c): a successful substantive tool backs the turn -> pass.
         return None
 
     # (a): an action claim with ZERO substantive tool calls this turn = LARP.
